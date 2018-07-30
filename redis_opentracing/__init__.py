@@ -1,28 +1,25 @@
 from functools import wraps
 
 import redis
+import opentracing_instrumentation
+import opentracing_instrumentation.utils
 
-g_tracer = None
 g_trace_prefix = None
 g_trace_all_classes = True
 
-def init_tracing(tracer, trace_all_classes=True, prefix='Redis'):
+def setup_tracing(trace_all_classes=True, prefix='Redis'):
     '''
     Set our tracer for Redis. Tracer objects from the
     OpenTracing django/flask/pyramid libraries can be passed as well.
 
-    :param tracer: the tracer object.
     :param trace_all_classes: If True, Redis clients and pipelines
         are automatically traced. Else, explicit tracing on them
         is required.
     :param prefix: The prefix for the operation name, if any.
         By default it is set to 'Redis'.
     '''
-    global g_tracer, g_trace_all_classes, g_trace_prefix
-    if hasattr(tracer, '_tracer'):
-        tracer = tracer._tracer
+    global g_trace_all_classes, g_trace_prefix
 
-    g_tracer = tracer
     g_trace_all_classes = trace_all_classes
     g_trace_prefix = prefix
 
@@ -42,7 +39,7 @@ def trace_pipeline(pipe):
     '''
     Marks a pipeline to be traced.
 
-    :param client: the Redis pipeline object to be traced.
+    :param pipe: the Redis pipeline object to be traced.
     If executed as a transaction, the commands will appear
     under a single 'MULTI' operation.
     '''
@@ -143,7 +140,9 @@ def _patch_pipe_execute(pipe):
             # Nothing to process/handle.
             return execute_method(raise_on_error=raise_on_error)
 
-        span = g_tracer.start_span(_get_operation_name('MULTI'))
+        span = opentracing_instrumentation.utils.start_child_span(
+            operation_name=_get_operation_name('MULTI'),
+            parent=opentracing_instrumentation.get_current_span())
         _set_base_span_tags(span, _normalize_stmts(pipe.command_stack))
 
         try:
@@ -164,7 +163,9 @@ def _patch_pipe_execute(pipe):
     @wraps(immediate_execute_method)
     def tracing_immediate_execute_command(*args, **options):
         command = args[0]
-        span = g_tracer.start_span(_get_operation_name(command))
+        span = opentracing_instrumentation.utils.start_child_span(
+            operation_name=_get_operation_name(command),
+            parent=opentracing_instrumentation.get_current_span())
         _set_base_span_tags(span, _normalize_stmt(args))
 
         try:
@@ -187,7 +188,9 @@ def _patch_pubsub_parse_response(pubsub):
 
     @wraps(parse_response_method)
     def tracing_parse_response(block=True, timeout=0):
-        span = g_tracer.start_span(_get_operation_name('SUB'))
+        span = opentracing_instrumentation.utils.start_child_span(
+            operation_name=_get_operation_name('SUB'),
+            parent=opentracing_instrumentation.get_current_span())
         _set_base_span_tags(span, '')
 
         try:
@@ -216,7 +219,9 @@ def _patch_obj_execute_command(redis_obj, is_klass=False):
 
         command = reported_args[0]
 
-        span = g_tracer.start_span(_get_operation_name(command))
+        span = opentracing_instrumentation.utils.start_child_span(
+            operation_name=_get_operation_name(command),
+            parent=opentracing_instrumentation.get_current_span())
         _set_base_span_tags(span, _normalize_stmt(reported_args))
 
         try:

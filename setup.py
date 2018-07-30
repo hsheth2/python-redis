@@ -15,7 +15,8 @@ setup(
     platforms='any',
     install_requires=[
         'redis',
-        'opentracing>=1.1,<1.2'
+        'opentracing>=1.1',
+        'opentracing_instrumentation',
     ],
     classifiers=[
         'Intended Audience :: Developers',
