@@ -6,6 +6,7 @@ import opentracing_instrumentation.utils
 
 g_trace_prefix = None
 g_trace_all_classes = True
+_ARGUMENT_LENGTH_LIMIT = 128
 
 def setup_tracing(trace_all_classes=True, prefix='Redis'):
     '''
@@ -63,8 +64,18 @@ def _get_operation_name(operation_name):
 
     return operation_name
 
+def _truncate(val):
+    val = str(val)
+    try:
+        val = unicode(val)
+        if len(val) > _ARGUMENT_LENGTH_LIMIT:
+            val = val[:_ARGUMENT_LENGTH_LIMIT]
+    except:
+        val = u'{bytes}'
+    return val
+
 def _normalize_stmt(args):
-    return ' '.join([str(arg) for arg in args])
+    return ' '.join([_truncate(arg) for arg in args])
 
 def _normalize_stmts(command_stack):
     commands = [_normalize_stmt(command[0]) for command in command_stack]
