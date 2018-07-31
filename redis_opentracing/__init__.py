@@ -1,12 +1,18 @@
 from functools import wraps
 
+import re
 import redis
+from opentracing.ext import tags as ext_tags
 import opentracing_instrumentation
 import opentracing_instrumentation.utils
 
+# regex to match an ipv4 address
+IPV4_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+
+_ARGUMENT_LENGTH_LIMIT = 128
+
 g_trace_prefix = None
 g_trace_all_classes = True
-_ARGUMENT_LENGTH_LIMIT = 128
 
 def setup_tracing(trace_all_classes=True, prefix='Redis'):
     '''
@@ -81,12 +87,38 @@ def _normalize_stmts(command_stack):
     commands = [_normalize_stmt(command[0]) for command in command_stack]
     return ';'.join(commands)
 
-def _set_base_span_tags(span, stmt):
+def _set_base_span_tags(self, span, stmt):
+    if self:
+        peer_tags = _peer_tags(self)
+        for tag_key, tag_val in peer_tags:
+            span.set_tag(tag_key, tag_val)
+
     span.set_tag('component', 'redis-py')
     span.set_tag('db.type', 'redis')
     span.set_tag('db.statement', stmt)
     span.set_tag('span.kind', 'client')
 
+def _peer_tags(self):
+    """Fetch the peer host/port tags for opentracing."""
+
+    # from https://github.com/hsheth2/opentracing-python-instrumentation/blob/8fb509a16d60b05938ca33c31e9a007467b9e65d/opentracing_instrumentation/client_hooks/strict_redis.py#L48-L68
+    if hasattr(self, 'connection_pool'):
+        connection_pool = self.connection_pool
+    else:
+        connection_pool = self
+
+    peer_tags = []
+    conn_info = connection_pool.connection_kwargs
+    host = conn_info.get('host')
+    if host:
+        if IPV4_RE.match(host):
+            peer_tags.append((ext_tags.PEER_HOST_IPV4, host))
+        else:
+            peer_tags.append((ext_tags.PEER_HOSTNAME, host))
+    port = conn_info.get('port')
+    if port:
+        peer_tags.append((ext_tags.PEER_PORT, port))
+    return peer_tags
 
 def _patch_redis_classes():
     # Patch the outgoing commands.
@@ -154,7 +186,7 @@ def _patch_pipe_execute(pipe):
         span = opentracing_instrumentation.utils.start_child_span(
             operation_name=_get_operation_name('MULTI'),
             parent=opentracing_instrumentation.get_current_span())
-        _set_base_span_tags(span, _normalize_stmts(pipe.command_stack))
+        _set_base_span_tags(pipe, span, _normalize_stmts(pipe.command_stack))
 
         try:
             res = execute_method(raise_on_error=raise_on_error)
@@ -177,7 +209,7 @@ def _patch_pipe_execute(pipe):
         span = opentracing_instrumentation.utils.start_child_span(
             operation_name=_get_operation_name(command),
             parent=opentracing_instrumentation.get_current_span())
-        _set_base_span_tags(span, _normalize_stmt(args))
+        _set_base_span_tags(pipe, span, _normalize_stmt(args))
 
         try:
             res = immediate_execute_method(*args, **options)
@@ -202,7 +234,7 @@ def _patch_pubsub_parse_response(pubsub):
         span = opentracing_instrumentation.utils.start_child_span(
             operation_name=_get_operation_name('SUB'),
             parent=opentracing_instrumentation.get_current_span())
-        _set_base_span_tags(span, '')
+        _set_base_span_tags(pubsub, span, '')
 
         try:
             rv = parse_response_method(block=block, timeout=timeout)
@@ -224,8 +256,10 @@ def _patch_obj_execute_command(redis_obj, is_klass=False):
     def tracing_execute_command(*args, **kwargs):
         if is_klass: 
             # Unbound method, we will get 'self' in args.
+            self = args[0]
             reported_args = args[1:]
         else:
+            self = None
             reported_args = args
 
         command = reported_args[0]
@@ -233,7 +267,7 @@ def _patch_obj_execute_command(redis_obj, is_klass=False):
         span = opentracing_instrumentation.utils.start_child_span(
             operation_name=_get_operation_name(command),
             parent=opentracing_instrumentation.get_current_span())
-        _set_base_span_tags(span, _normalize_stmt(reported_args))
+        _set_base_span_tags(self, span, _normalize_stmt(reported_args))
 
         try:
             rv = execute_command_method(*args, **kwargs)
